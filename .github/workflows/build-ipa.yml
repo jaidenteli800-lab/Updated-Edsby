@@ -15,16 +15,14 @@ jobs:
         shell: bash
         run: |
           set -e
-
           rm -rf extracted Payload build
           mkdir -p extracted
-
           unzip -q fixed.zip -d extracted
 
           echo "=== Extracted files ==="
           find extracted -maxdepth 3 -print
 
-      - name: Check and repair Xcode project
+      - name: Check project
         shell: bash
         run: |
           set -e
@@ -33,111 +31,94 @@ jobs:
           PBXPROJ="$PROJECT/project.pbxproj"
 
           if [ ! -d "$PROJECT" ]; then
-            echo "ERROR: $PROJECT was not found."
+            echo "ERROR: DCDSBFresh.xcodeproj was not found."
             exit 1
           fi
 
           if [ ! -f "$PBXPROJ" ]; then
-            echo "ERROR: $PBXPROJ was not found."
+            echo "ERROR: project.pbxproj was not found."
             exit 1
           fi
 
-          echo "=== Original project header ==="
-          head -40 "$PBXPROJ"
+          echo "Found project:"
+          echo "$PROJECT"
 
           echo ""
-          echo "=== Checking objectVersion ==="
+          echo "=== Project header ==="
+          head -30 "$PBXPROJ"
 
-          OBJECT_VERSION=$(grep -E '^[[:space:]]*objectVersion[[:space:]]*=' "$PBXPROJ" \
-            | head -1 \
-            | sed 's/[^0-9]//g' || true)
+      - name: Repair project objectVersion
+        shell: bash
+        run: |
+          set -e
+
+          PBXPROJ="extracted/DCDSBFresh.xcodeproj/project.pbxproj"
+
+          OBJECT_VERSION=$(grep -E "^[[:space:]]*objectVersion[[:space:]]*=" "$PBXPROJ" | head -1 | grep -oE "[0-9]+" || true)
 
           echo "Detected objectVersion: ${OBJECT_VERSION:-MISSING}"
 
-          # Xcode 26 can read modern project formats.
-          # If the project has a missing/invalid objectVersion,
-          # repair it to a supported modern value.
-          if [ -z "$OBJECT_VERSION" ] || [ "$OBJECT_VERSION" = "0" ]; then
-            echo "Invalid/missing objectVersion detected."
-            echo "Adding objectVersion = 77."
+          if [ -z "$OBJECT_VERSION" ]; then
+            echo "objectVersion is missing. Adding objectVersion = 77."
 
-            python3 - <<'PY'
-from pathlib import Path
+            sed -i '' '/archiveVersion = 1;/a\
+	objectVersion = 77;
+' "$PBXPROJ"
 
-path = Path("extracted/DCDSBFresh.xcodeproj/project.pbxproj")
-text = path.read_text()
+          elif [ "$OBJECT_VERSION" = "0" ]; then
+            echo "objectVersion is 0. Changing it to 77."
 
-if "objectVersion =" not in text:
-    text = text.replace(
-        "archiveVersion = 1;",
-        "archiveVersion = 1;\n\tobjectVersion = 77;",
-        1
-    )
-else:
-    import re
-    text = re.sub(
-        r"objectVersion\s*=\s*\d+\s*;",
-        "objectVersion = 77;",
-        text,
-        count=1
-    )
-
-path.write_text(text)
-PY
+            sed -i '' 's/objectVersion = 0;/objectVersion = 77;/' "$PBXPROJ"
+          else
+            echo "objectVersion is already $OBJECT_VERSION."
           fi
 
           echo ""
-          echo "=== Repaired project header ==="
-          head -40 "$PBXPROJ"
+          echo "=== Updated project header ==="
+          head -30 "$PBXPROJ"
 
-      - name: Validate Xcode project
+      - name: Test Xcode project
         shell: bash
         run: |
           set -e
 
-          echo "=== Testing Xcode project ==="
+          echo "=== Running xcodebuild -list ==="
 
           xcodebuild \
             -project "extracted/DCDSBFresh.xcodeproj" \
             -list
 
-      - name: Find Xcode scheme
+      - name: Find scheme
         shell: bash
         run: |
           set -e
 
-          echo "=== Available schemes ==="
+          echo "=== Finding scheme ==="
 
           xcodebuild \
             -project "extracted/DCDSBFresh.xcodeproj" \
-            -list
+            -list > schemes.txt
 
-          SCHEME=$(
-            xcodebuild \
-              -project "extracted/DCDSBFresh.xcodeproj" \
-              -list 2>/dev/null |
-            awk '
-              /Schemes:/ {
-                found=1
-                next
-              }
-              found && NF {
-                gsub(/^[ \t]+|[ \t]+$/, "")
-                print
-                exit
-              }
-            '
-          )
+          cat schemes.txt
+
+          SCHEME=$(awk '
+            /Schemes:/ {
+              found=1
+              next
+            }
+            found && NF {
+              gsub(/^[ \t]+|[ \t]+$/, "")
+              print
+              exit
+            }
+          ' schemes.txt)
 
           if [ -z "$SCHEME" ]; then
-            echo "ERROR: No Xcode scheme was found."
-            echo ""
-            echo "The project may not contain a shared scheme."
+            echo "ERROR: No scheme found."
             exit 1
           fi
 
-          echo "Using scheme: $SCHEME"
-
+          echo "Selected scheme: $SCHEME"
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
       - name: Build unsigned app
@@ -148,8 +129,7 @@ PY
           rm -rf build
           mkdir -p build
 
-          echo "=== Building ==="
-          echo "Project: DCDSBFresh.xcodeproj"
+          echo "=== Building unsigned app ==="
           echo "Scheme: $SCHEME"
 
           xcodebuild \
@@ -163,12 +143,12 @@ PY
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM=""
 
-      - name: Find built app
+      - name: Find app
         shell: bash
         run: |
           set -e
 
-          echo "=== Searching for .app ==="
+          echo "=== Searching for app ==="
 
           APP=$(find "$PWD/build/Build/Products" \
             -type d \
@@ -186,12 +166,12 @@ PY
             exit 1
           fi
 
-          echo "Found:"
+          echo "Found app:"
           echo "$APP"
 
           echo "APP=$APP" >> "$GITHUB_ENV"
 
-      - name: Create unsigned IPA
+      - name: Create IPA
         shell: bash
         run: |
           set -e
@@ -207,11 +187,10 @@ PY
           zip -r "../DCDSBFresh-Unsigned.ipa" ./*.app
           cd ..
 
-          echo ""
           echo "=== IPA created ==="
           ls -lh DCDSBFresh-Unsigned.ipa
 
-      - name: Upload unsigned IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: DCDSBFresh-Unsigned-IPA
