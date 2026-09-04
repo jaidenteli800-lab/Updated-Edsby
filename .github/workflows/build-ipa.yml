@@ -14,6 +14,8 @@ jobs:
       - name: Extract fixed.zip
         shell: bash
         run: |
+          set -e
+
           rm -rf extracted Payload build
           mkdir -p extracted
 
@@ -25,6 +27,8 @@ jobs:
       - name: Check Xcode project
         shell: bash
         run: |
+          set -e
+
           if [ ! -d "extracted/DCDSBFresh.xcodeproj" ]; then
             echo "ERROR: DCDSBFresh.xcodeproj was not found."
             exit 1
@@ -32,13 +36,53 @@ jobs:
 
           echo "Found DCDSBFresh.xcodeproj"
 
-      - name: Build unsigned app
+      - name: Find Xcode scheme
         shell: bash
         run: |
-          mkdir -p build
+          set -e
+
+          echo "=== Available schemes ==="
 
           xcodebuild \
             -project "extracted/DCDSBFresh.xcodeproj" \
+            -list
+
+          SCHEME=$(xcodebuild \
+            -project "extracted/DCDSBFresh.xcodeproj" \
+            -list 2>/dev/null |
+            awk '
+              /Schemes:/ {
+                found=1
+                next
+              }
+              found && NF {
+                gsub(/^[ \t]+|[ \t]+$/, "")
+                print
+                exit
+              }
+            ')
+
+          if [ -z "$SCHEME" ]; then
+            echo "ERROR: Could not automatically find an Xcode scheme."
+            exit 1
+          fi
+
+          echo "Using scheme: $SCHEME"
+          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+
+      - name: Build unsigned app
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf build
+          mkdir -p build
+
+          echo "=== Building scheme: $SCHEME ==="
+
+          xcodebuild \
+            -project "extracted/DCDSBFresh.xcodeproj" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath "$PWD/build" \
@@ -50,27 +94,34 @@ jobs:
       - name: Find built app
         shell: bash
         run: |
+          set -e
+
           echo "=== Searching for .app ==="
 
-          APP=$(find "$PWD/build" \
+          APP=$(find "$PWD/build/Build/Products" \
             -type d \
-            -path "*Build/Products/*-iphoneos/*.app" \
+            -name "*.app" \
+            -path "*-iphoneos/*" \
             -print -quit)
 
           if [ -z "$APP" ]; then
             echo "ERROR: No .app was produced."
             echo ""
-            echo "Build directory:"
-            find build -maxdepth 6 -print
+            echo "=== Build directory ==="
+            find "$PWD/build" -maxdepth 8 -print
             exit 1
           fi
 
+          echo "Found app:"
+          echo "$APP"
+
           echo "APP=$APP" >> "$GITHUB_ENV"
-          echo "Found: $APP"
 
       - name: Create unsigned IPA
         shell: bash
         run: |
+          set -e
+
           rm -rf Payload
           mkdir -p Payload
 
@@ -79,8 +130,7 @@ jobs:
           rm -f DCDSBFresh-Unsigned.ipa
 
           cd Payload
-          zip -r "../DCDSBFresh-Unsigned.ipa" "*.app"
-
+          zip -r "../DCDSBFresh-Unsigned.ipa" ./*.app
           cd ..
 
           echo "=== IPA created ==="
