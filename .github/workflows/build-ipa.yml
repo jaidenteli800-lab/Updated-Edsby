@@ -24,17 +24,82 @@ jobs:
           echo "=== Extracted files ==="
           find extracted -maxdepth 3 -print
 
-      - name: Check Xcode project
+      - name: Check and repair Xcode project
         shell: bash
         run: |
           set -e
 
-          if [ ! -d "extracted/DCDSBFresh.xcodeproj" ]; then
-            echo "ERROR: DCDSBFresh.xcodeproj was not found."
+          PROJECT="extracted/DCDSBFresh.xcodeproj"
+          PBXPROJ="$PROJECT/project.pbxproj"
+
+          if [ ! -d "$PROJECT" ]; then
+            echo "ERROR: $PROJECT was not found."
             exit 1
           fi
 
-          echo "Found DCDSBFresh.xcodeproj"
+          if [ ! -f "$PBXPROJ" ]; then
+            echo "ERROR: $PBXPROJ was not found."
+            exit 1
+          fi
+
+          echo "=== Original project header ==="
+          head -40 "$PBXPROJ"
+
+          echo ""
+          echo "=== Checking objectVersion ==="
+
+          OBJECT_VERSION=$(grep -E '^[[:space:]]*objectVersion[[:space:]]*=' "$PBXPROJ" \
+            | head -1 \
+            | sed 's/[^0-9]//g' || true)
+
+          echo "Detected objectVersion: ${OBJECT_VERSION:-MISSING}"
+
+          # Xcode 26 can read modern project formats.
+          # If the project has a missing/invalid objectVersion,
+          # repair it to a supported modern value.
+          if [ -z "$OBJECT_VERSION" ] || [ "$OBJECT_VERSION" = "0" ]; then
+            echo "Invalid/missing objectVersion detected."
+            echo "Adding objectVersion = 77."
+
+            python3 - <<'PY'
+from pathlib import Path
+
+path = Path("extracted/DCDSBFresh.xcodeproj/project.pbxproj")
+text = path.read_text()
+
+if "objectVersion =" not in text:
+    text = text.replace(
+        "archiveVersion = 1;",
+        "archiveVersion = 1;\n\tobjectVersion = 77;",
+        1
+    )
+else:
+    import re
+    text = re.sub(
+        r"objectVersion\s*=\s*\d+\s*;",
+        "objectVersion = 77;",
+        text,
+        count=1
+    )
+
+path.write_text(text)
+PY
+          fi
+
+          echo ""
+          echo "=== Repaired project header ==="
+          head -40 "$PBXPROJ"
+
+      - name: Validate Xcode project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Testing Xcode project ==="
+
+          xcodebuild \
+            -project "extracted/DCDSBFresh.xcodeproj" \
+            -list
 
       - name: Find Xcode scheme
         shell: bash
@@ -47,9 +112,10 @@ jobs:
             -project "extracted/DCDSBFresh.xcodeproj" \
             -list
 
-          SCHEME=$(xcodebuild \
-            -project "extracted/DCDSBFresh.xcodeproj" \
-            -list 2>/dev/null |
+          SCHEME=$(
+            xcodebuild \
+              -project "extracted/DCDSBFresh.xcodeproj" \
+              -list 2>/dev/null |
             awk '
               /Schemes:/ {
                 found=1
@@ -60,14 +126,18 @@ jobs:
                 print
                 exit
               }
-            ')
+            '
+          )
 
           if [ -z "$SCHEME" ]; then
-            echo "ERROR: Could not automatically find an Xcode scheme."
+            echo "ERROR: No Xcode scheme was found."
+            echo ""
+            echo "The project may not contain a shared scheme."
             exit 1
           fi
 
           echo "Using scheme: $SCHEME"
+
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
       - name: Build unsigned app
@@ -78,7 +148,9 @@ jobs:
           rm -rf build
           mkdir -p build
 
-          echo "=== Building scheme: $SCHEME ==="
+          echo "=== Building ==="
+          echo "Project: DCDSBFresh.xcodeproj"
+          echo "Scheme: $SCHEME"
 
           xcodebuild \
             -project "extracted/DCDSBFresh.xcodeproj" \
@@ -106,13 +178,15 @@ jobs:
 
           if [ -z "$APP" ]; then
             echo "ERROR: No .app was produced."
+
             echo ""
             echo "=== Build directory ==="
             find "$PWD/build" -maxdepth 8 -print
+
             exit 1
           fi
 
-          echo "Found app:"
+          echo "Found:"
           echo "$APP"
 
           echo "APP=$APP" >> "$GITHUB_ENV"
@@ -133,6 +207,7 @@ jobs:
           zip -r "../DCDSBFresh-Unsigned.ipa" ./*.app
           cd ..
 
+          echo ""
           echo "=== IPA created ==="
           ls -lh DCDSBFresh-Unsigned.ipa
 
